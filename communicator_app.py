@@ -1,9 +1,9 @@
-import sys
-
+import csv
 import numpy as np
 import pickle
 import time
 import socket
+import sys
 
 from multiprocessing import Process, Event
 from util import current_milli_time
@@ -54,6 +54,7 @@ class Consumer(Base):
 
         self.consume()
         self.analyze_data()
+        self.save_to_file()
 
     def receive_exactly(self, n):
         """
@@ -102,8 +103,7 @@ class Consumer(Base):
                 # Add the vector to the current matrix
                 curr_matrix[:, vector_idx] = data_vector
                 self.vectors_received += 1
-                #if self.vectors_received % self.matrix_size == 0:
-                if self.vectors_received % 5 == 0:
+                if self.vectors_received % self.matrix_size == 0:
                     # Save the current matrix to the matrices array
                     self.data_matrices.append(curr_matrix)
                     # Create a new matrix
@@ -128,12 +128,34 @@ class Consumer(Base):
     def analyze_data(self):
         # Data acquisition rates
         np_rates = np.array(self.data_acq_rates)
+        self.rates_mean = round(np.mean(np_rates), 2)
+        self.rates_std = round(np.std(np_rates), 2)
         print(f'rates={np_rates}')
         print(f'rates_mean={np.mean(np_rates)}')
         print(f'rates_std={round(np.std(np_rates), 2)}')
         # Data metrices
-        metrices_mean = [np.mean(matrix, 0) for matrix in self.data_matrices]
-        metrices_std = [np.std(matrix, 0) for matrix in self.data_matrices]
+        self.metrices_mean = [np.round(np.mean(matrix, 0), 3) for matrix in self.data_matrices]
+        self.metrices_std = [np.round(np.std(matrix, 0), 3) for matrix in self.data_matrices]
+        x = 6
+
+    def save_to_file(self):
+        """
+        Save results to file
+        """
+        time_str = time.strftime("%Y%m%d-%H%M%S")
+        file_name = f'results_{time_str}.csv'
+        with open(file_name, 'w', newline='') as f:
+            writer = csv.writer(f)
+            f.write("Data Acquisition Rates:\n")
+            writer.writerow(self.data_acq_rates)
+            f.write("\nData Acquisition Rates - Mean:\n")
+            f.write(f'{self.rates_mean}\n')
+            f.write("\nData Acquisition Rates - Standard Deviation:\n")
+            f.write(f'{self.rates_std}\n')
+            f.write("\nData Analytics Results - Mean:\n")
+            writer.writerows(self.metrices_mean)
+            f.write("\nData Analytics Results - Standard Deviation:\n")
+            writer.writerows(self.metrices_std)
 
 
 class Producer(Base):
@@ -175,10 +197,9 @@ class Producer(Base):
         """
         Produce random data vectors and send them across the socket
         """
-        # Initialize the next noisy time
         deadline = time.time() + self.timeout
+        # Initialize the next noisy time
         next_noisy_time = self.get_next_noisy_time()
-        packet_lose = [time.time()] # TODO: delete
         try:
             while time.time() < deadline:
                 start_time = time.time()
@@ -187,11 +208,6 @@ class Producer(Base):
                         # Clear the network_is_up event to notify on a noisy
                         # mode
                         self.network_is_up.clear()
-                        packet_lose.append(time.time())
-                        if len(packet_lose) == 10: # TODO: delete
-                            for i in range(0, 9):
-                                print(
-                                    f'interval={round(packet_lose[i + 1] - packet_lose[i], 4)}')
                         # Calculate the next noisy time
                         next_noisy_time = self.get_next_noisy_time(next_noisy_time)
                         # Sleep to stimulate the time spent on trying to send
@@ -221,8 +237,12 @@ if __name__ == "__main__":
         timeout = int(sys.argv[1])
     except IndexError:
         print("Please specify timeout in seconds. Usage example:\n"
-              "python ./congitive.py 60")
+              "python ./communicator_app.py 60")
         sys.exit(1)
+    if timeout <= 0:
+        print("Please pass a valid timeout >= 0")
+        sys.exit(1)
+
     host = 'localhost'
     port = 8008
     network_is_up = Event()
