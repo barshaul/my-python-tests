@@ -23,7 +23,7 @@ class Base:
 
 class Consumer(Base):
     """
-    A Consumer class to consumer random data vectors from a producer over the
+    A Consumer class to consume random data vectors from a producer over the
     socket
     """
     def __init__(self, host, port, timeout, vector_size, packets_per_second,
@@ -215,6 +215,7 @@ class Producer(Base):
                         time.sleep(0.0015)
                         # Set back the network to True
                         self.network_is_up.set()
+                        continue
                     rand_vector = np.random.uniform(-1, 0,
                                                     self.vector_size)
                     data_vector = pickle.dumps(rand_vector)
