@@ -45,16 +45,22 @@ class Consumer(Base):
         """
         self.network_is_up = network_is_up
         print('Running Consumer')
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.bind(self.address)
-        self.socket.listen(1)
-        print('Consumer: listening..')
-        self.conn, self.addr = self.socket.accept()
-        self.conn.settimeout(0.001)
-
-        self.consume()
-        self.analyze_data()
-        self.save_to_file()
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Wait until the producer is ready to accept connections
+            network_is_up.wait()
+            self.socket.connect(self.address)
+            # Set the timeout to the expected rate (1000Hz)
+            self.socket.settimeout(0.001)
+            # Start consuming
+            self.consume()
+            self.analyze_data()
+            self.save_to_file()
+        except BaseException as e:
+            print(f'Exception was thrown on the consumer:\n{e}')
+            raise e
+        finally:
+            self.socket.close()
 
     def receive_exactly(self, n):
         """
@@ -65,7 +71,7 @@ class Consumer(Base):
         data = b''
         while n > 0:
             try:
-                chunk = self.conn.recv(n)
+                chunk = self.socket.recv(n)
                 n -= len(chunk)
                 data += chunk
             except socket.timeout as e:
@@ -83,47 +89,39 @@ class Consumer(Base):
         start_time = time.time()
         deadline = start_time + self.timeout
         curr_matrix = np.zeros((self.vector_size, self.matrix_size))
-        try:
-            while time.time() < deadline:
-                if not self.network_is_up.is_set():
-                    # Noisy mode is on
-                    print('Warning! There was a packet lost')
-                    s = time.time()
-                    # Wait until the noisy mode ends
-                    self.network_is_up.wait()
-                # Receive the exact bytes sent as part of the vector
-                data = self.receive_exactly(self.data_size)
-                if data is None:
-                    # Nothing to do
-                    continue
-                # Unpickle the vector
-                data_vector = pickle.loads(data)
-                # Calculate the index of the current vector in the matrix
-                vector_idx = self.vectors_received % self.matrix_size
-                # Add the vector to the current matrix
-                curr_matrix[:, vector_idx] = data_vector
-                self.vectors_received += 1
-                if self.vectors_received % self.matrix_size == 0:
-                    # Save the current matrix to the matrices array
-                    self.data_matrices.append(curr_matrix)
-                    # Create a new matrix
-                    curr_matrix = np.zeros((self.vector_size, self.matrix_size))
-                if self.vectors_received % self.pckts_per_sec == 0:
-                    # Calculate the data acquisition rate of the last
-                    # {self.pckts_per_sec} vectors
-                    time_spent = time.time() - start_time
-                    data_acqus_rate = round(self.pckts_per_sec / time_spent)
-                    # reset the start_time for the next series of vectors
-                    start_time = time.time()
-                    print(f'Data acquisition rate={data_acqus_rate}Hz')
-                    # Add the current rate to the rates array
-                    self.data_acq_rates.append(data_acqus_rate)
-
-        except BaseException as e:
-            print(f'Exception was thrown on the consumer:\n{e}')
-            raise e
-        finally:
-            self.socket.close()
+        while time.time() < deadline:
+            if not self.network_is_up.is_set():
+                # Noisy mode is on
+                print('Warning! There was a packet lost')
+                # Wait until the noisy mode ends
+                self.network_is_up.wait()
+            # Receive the exact bytes sent as part of the vector
+            data = self.receive_exactly(self.data_size)
+            if data is None:
+                # Nothing to do
+                continue
+            # Unpickle the vector
+            data_vector = pickle.loads(data)
+            # Calculate the index of the current vector in the matrix
+            vector_idx = self.vectors_received % self.matrix_size
+            # Add the vector to the current matrix
+            curr_matrix[:, vector_idx] = data_vector
+            self.vectors_received += 1
+            if self.vectors_received % self.matrix_size == 0:
+                # Save the current matrix to the matrices array
+                self.data_matrices.append(curr_matrix)
+                # Create a new matrix
+                curr_matrix = np.zeros((self.vector_size, self.matrix_size))
+            if self.vectors_received % self.pckts_per_sec == 0:
+                # Calculate the data acquisition rate of the last
+                # {self.pckts_per_sec} vectors
+                time_spent = time.time() - start_time
+                data_acqus_rate = round(self.pckts_per_sec / time_spent)
+                print(f'Data acquisition rate={data_acqus_rate}Hz')
+                # Add the current rate to the rates array
+                self.data_acq_rates.append(data_acqus_rate)
+                # reset the start_time for the next series of vectors
+                start_time = time.time()
 
     def analyze_data(self):
         # Data acquisition rates
@@ -131,8 +129,8 @@ class Consumer(Base):
         self.rates_mean = round(np.mean(np_rates), 2)
         self.rates_std = round(np.std(np_rates), 2)
         print(f'rates={np_rates}')
-        print(f'rates_mean={np.mean(np_rates)}')
-        print(f'rates_std={round(np.std(np_rates), 2)}')
+        print(f'rates_mean={self.rates_mean}')
+        print(f'rates_std={self.rates_std}')
         # Data metrices
         self.metrices_mean = [np.round(np.mean(matrix, 0), 3) for matrix in self.data_matrices]
         self.metrices_std = [np.round(np.std(matrix, 0), 3) for matrix in self.data_matrices]
@@ -167,25 +165,35 @@ class Producer(Base):
         """
         Start the Producer
         """
-        self.network_is_up = network_is_up
-        print('Running Producer')
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.settimeout(5)
-        self.socket.connect(self.address)
-        self.network_is_up.set()
-        self.produce()
+        try:
+            self.network_is_up = network_is_up
+            print('Running Producer')
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.socket.bind(self.address)
+            self.socket.listen(1)
+            # Set the network to running
+            self.network_is_up.set()
+            print('Producer: listening..')
+            self.conn, self.addr = self.socket.accept()
+            # Start producing
+            self.produce()
+        except BaseException as e:
+            print(f'Exception was thrown on the producer:\n{e}')
+            raise e
+        finally:
+            self.conn.close()
+            self.socket.close()
 
     def is_noisy(self, next_noisy_time):
         """
         Check if the current time needs to be set as a noisy time
         """
-        current_time = current_milli_time()
-        adjusted_noisy_time = next_noisy_time
-        return current_time >= adjusted_noisy_time
+        return current_milli_time() >= next_noisy_time
 
     def get_next_noisy_time(self, prev_noisy_time=0):
         """
-        Get the next noisy time based on a random interval of [2, 3] seconds
+        Get the next noisy time (in UTC) based on a random interval of [2, 3] seconds
         """
         if prev_noisy_time == 0:
             prev_noisy_time = current_milli_time()
@@ -200,37 +208,31 @@ class Producer(Base):
         deadline = time.time() + self.timeout
         # Initialize the next noisy time
         next_noisy_time = self.get_next_noisy_time()
-        try:
-            while time.time() < deadline:
-                start_time = time.time()
-                for i in range(1, self.pckts_per_sec):
-                    if self.is_noisy(next_noisy_time):
-                        # Clear the network_is_up event to notify on a noisy
-                        # mode
-                        self.network_is_up.clear()
-                        # Calculate the next noisy time
-                        next_noisy_time = self.get_next_noisy_time(next_noisy_time)
-                        # Sleep to stimulate the time spent on trying to send
-                        # the message
-                        time.sleep(0.0015)
-                        # Set back the network to True
-                        self.network_is_up.set()
-                        continue
-                    rand_vector = np.random.uniform(-1, 0,
-                                                    self.vector_size)
-                    data_vector = pickle.dumps(rand_vector)
-                    self.socket.sendall(data_vector)
-                # Adjust the required pause based on the time spent sending the
-                # vectors
-                time_spent = time.time() - start_time
-                pause_for = self.delta_t * self.pckts_per_sec - time_spent
-                pause_for = 0 if pause_for < 0 else pause_for
-                time.sleep(pause_for)
-        except BaseException as e:
-            print(f'Exception was thrown on the producer:\n{e}')
-            raise e
-        finally:
-            self.socket.close()
+        while time.time() < deadline:
+            start_time = time.time()
+            for i in range(1, self.pckts_per_sec):
+                if self.is_noisy(next_noisy_time):
+                    # Clear the network_is_up event to notify on a noisy
+                    # mode
+                    self.network_is_up.clear()
+                    # Calculate the next noisy time
+                    next_noisy_time = self.get_next_noisy_time(next_noisy_time)
+                    # Sleep to stimulate the time spent on trying to send
+                    # the message
+                    time.sleep(0.0015)
+                    # Set back the network to True
+                    self.network_is_up.set()
+                    continue
+                rand_vector = np.random.uniform(-1, 0,
+                                                self.vector_size)
+                data_vector = pickle.dumps(rand_vector)
+                self.conn.sendall(data_vector)
+            # Adjust the required pause based on the time spent sending the
+            # vectors
+            time_spent = time.time() - start_time
+            pause_for = self.delta_t * self.pckts_per_sec - time_spent
+            pause_for = 0 if pause_for < 0 else pause_for
+            time.sleep(pause_for)
 
 
 if __name__ == "__main__":
