@@ -219,7 +219,7 @@ class Producer(Base):
                     next_noisy_time = self.get_next_noisy_time(next_noisy_time)
                     # Sleep to stimulate the time spent on trying to send
                     # the message
-                    time.sleep(0.0015)
+                    time.sleep(0.001)
                     # Set back the network to True
                     self.network_is_up.set()
                     continue
